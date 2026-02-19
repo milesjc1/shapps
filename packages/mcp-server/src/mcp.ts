@@ -556,6 +556,114 @@ export class ShappsMCP extends McpAgent<Env> {
         };
       }
     );
+
+    // --- update_settings ---
+    this.server.tool(
+      "update_settings",
+      "Update project settings like name, slug, description, visibility, or source code toggle.",
+      {
+        project_id: z.string().uuid().describe("The project ID"),
+        name: z.string().optional().describe("New project name"),
+        slug: z.string().regex(/^[a-z0-9-]+$/).optional().describe("New URL slug (lowercase letters, numbers, hyphens)"),
+        description: z.string().optional().describe("New description"),
+        is_public: z.boolean().optional().describe("Whether the app is publicly visible"),
+        show_source: z.boolean().optional().describe("Whether visitors can view the source code"),
+      },
+      async ({ project_id, name, slug, description, is_public, show_source }) => {
+        const updates: Record<string, unknown> = {};
+        if (name !== undefined) updates.name = name;
+        if (slug !== undefined) updates.slug = slug;
+        if (description !== undefined) updates.description = description;
+        if (is_public !== undefined) updates.is_public = is_public;
+        if (show_source !== undefined) updates.show_source = show_source;
+
+        if (Object.keys(updates).length === 0) {
+          return { content: [{ type: "text", text: "Nothing to update. Provide at least one setting to change." }] };
+        }
+
+        updates.updated_at = new Date().toISOString();
+
+        const { data, error } = await supabase
+          .from("projects")
+          .update(updates)
+          .eq("id", project_id)
+          .select("id, name, slug, description, is_public, show_source")
+          .single();
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error updating settings: ${error.message}` }] };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ message: "Settings updated!", ...data }, null, 2),
+            },
+          ],
+        };
+      }
+    );
+
+    // --- delete_project ---
+    this.server.tool(
+      "delete_project",
+      "Permanently delete a project and all its versions and files. This cannot be undone.",
+      {
+        project_id: z.string().uuid().describe("The project ID"),
+        confirm: z.boolean().describe("Must be true to confirm deletion"),
+      },
+      async ({ project_id, confirm }) => {
+        if (!confirm) {
+          return { content: [{ type: "text", text: "Deletion not confirmed. Set confirm to true to delete." }] };
+        }
+
+        // Clear version pointers first (foreign key constraints)
+        const { error: clearError } = await supabase
+          .from("projects")
+          .update({ active_version_id: null, draft_version_id: null })
+          .eq("id", project_id);
+
+        if (clearError) {
+          return { content: [{ type: "text", text: `Error: ${clearError.message}` }] };
+        }
+
+        // Get all version IDs for this project
+        const { data: versions } = await supabase
+          .from("project_versions")
+          .select("id")
+          .eq("project_id", project_id);
+
+        // Delete files for all versions
+        if (versions && versions.length > 0) {
+          const versionIds = versions.map((v) => v.id);
+          await supabase
+            .from("project_files")
+            .delete()
+            .in("version_id", versionIds);
+        }
+
+        // Delete versions
+        await supabase
+          .from("project_versions")
+          .delete()
+          .eq("project_id", project_id);
+
+        // Delete the project
+        const { error: deleteError } = await supabase
+          .from("projects")
+          .delete()
+          .eq("id", project_id);
+
+        if (deleteError) {
+          return { content: [{ type: "text", text: `Error deleting project: ${deleteError.message}` }] };
+        }
+
+        return {
+          content: [{ type: "text", text: "Project deleted permanently." }],
+        };
+      }
+    );
   }
 }
 
