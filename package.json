@@ -1,0 +1,12 @@
+{
+  "name": "shapps",
+  "version": "0.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:mcp": "npm run dev --workspace=packages/mcp-server",
+    "deploy:mcp": "npm run deploy --workspace=packages/mcp-server"
+  }
+}
