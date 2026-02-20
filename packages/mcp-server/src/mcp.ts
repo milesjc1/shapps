@@ -2,16 +2,38 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import { getSupabase } from "./db";
-import type { Env } from "./types";
+import type { Env, Props } from "./types";
 
-export class ShappsMCP extends McpAgent<Env> {
+export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
     name: "Shapps",
-    version: "0.2.0",
+    version: "0.3.0",
   });
 
   async init() {
     const supabase = getSupabase(this.env.SUPABASE_URL, this.env.SUPABASE_ANON_KEY);
+
+    // --- whoami --- (Phase 3: lets user verify their identity)
+    this.server.tool(
+      "whoami",
+      "Check who you're signed in as",
+      {},
+      async () => {
+        if (!this.props?.email) {
+          return { content: [{ type: "text", text: "Not authenticated (running without OAuth)." }] };
+        }
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              email: this.props.email,
+              name: this.props.name,
+              userId: this.props.userId,
+            }, null, 2),
+          }],
+        };
+      }
+    );
 
     // --- create_project ---
     this.server.tool(
