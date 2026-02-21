@@ -7,8 +7,36 @@ import type { Env, Props } from "./types";
 export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
   server = new McpServer({
     name: "Shapps",
-    version: "0.3.0",
+    version: "0.4.0",
   });
+
+  /** Returns the authenticated user's email, or null if running without OAuth (e.g. Claude Desktop). */
+  private get userEmail(): string | null {
+    return this.props?.email ?? null;
+  }
+
+  /**
+   * Fetches a project by ID, scoped to the current user.
+   * If the user isn't authenticated, no email filter is applied (backwards compatible).
+   * Returns null if the project doesn't exist or doesn't belong to the user.
+   */
+  private async getOwnedProject(
+    supabase: ReturnType<typeof getSupabase>,
+    projectId: string,
+    selectColumns: string = "*"
+  ) {
+    let query = supabase
+      .from("projects")
+      .select(selectColumns)
+      .eq("id", projectId);
+
+    if (this.userEmail) {
+      query = query.eq("owner_email", this.userEmail);
+    }
+
+    const { data, error } = await query.single();
+    return { project: data, error };
+  }
 
   async init() {
     const supabase = getSupabase(this.env.SUPABASE_URL, this.env.SUPABASE_ANON_KEY);
@@ -45,9 +73,13 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         description: z.string().optional().describe("A short description of the project"),
       },
       async ({ name, slug, description }) => {
+        if (!this.userEmail) {
+          return { content: [{ type: "text", text: "Authentication required to create a project. Please sign in via OAuth." }] };
+        }
+
         const { data: project, error: projectError } = await supabase
           .from("projects")
-          .insert({ name, slug, description: description ?? null })
+          .insert({ name, slug, description: description ?? null, owner_email: this.userEmail })
           .select()
           .single();
 
@@ -97,10 +129,16 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
       "List all projects",
       {},
       async () => {
-        const { data, error } = await supabase
+        let query = supabase
           .from("projects")
           .select("id, name, slug, description, status, created_at, updated_at")
           .order("created_at", { ascending: false });
+
+        if (this.userEmail) {
+          query = query.eq("owner_email", this.userEmail);
+        }
+
+        const { data, error } = await query;
 
         if (error) {
           return { content: [{ type: "text", text: `Error listing projects: ${error.message}` }] };
@@ -124,14 +162,10 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         project_id: z.string().uuid().describe("The project ID"),
       },
       async ({ project_id }) => {
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("*")
-          .eq("id", project_id)
-          .single();
+        const { project, error: projectError } = await this.getOwnedProject(supabase, project_id);
 
-        if (projectError) {
-          return { content: [{ type: "text", text: `Error: ${projectError.message}` }] };
+        if (projectError || !project) {
+          return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
         }
 
         const versionId = project.draft_version_id ?? project.active_version_id;
@@ -165,14 +199,12 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         file_paths: z.array(z.string()).optional().describe("Specific file paths to read. If omitted, reads all files."),
       },
       async ({ project_id, file_paths }) => {
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("draft_version_id, active_version_id")
-          .eq("id", project_id)
-          .single();
+        const { project, error: projectError } = await this.getOwnedProject(
+          supabase, project_id, "draft_version_id, active_version_id"
+        );
 
-        if (projectError) {
-          return { content: [{ type: "text", text: `Error: ${projectError.message}` }] };
+        if (projectError || !project) {
+          return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
         }
 
         const versionId = project.draft_version_id ?? project.active_version_id;
@@ -220,14 +252,12 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         ).describe("The files to write"),
       },
       async ({ project_id, files }) => {
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("draft_version_id")
-          .eq("id", project_id)
-          .single();
+        const { project, error: projectError } = await this.getOwnedProject(
+          supabase, project_id, "draft_version_id"
+        );
 
-        if (projectError) {
-          return { content: [{ type: "text", text: `Error: ${projectError.message}` }] };
+        if (projectError || !project) {
+          return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
         }
 
         if (!project.draft_version_id) {
@@ -276,14 +306,12 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         file_paths: z.array(z.string()).describe("File paths to delete"),
       },
       async ({ project_id, file_paths }) => {
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("draft_version_id")
-          .eq("id", project_id)
-          .single();
+        const { project, error: projectError } = await this.getOwnedProject(
+          supabase, project_id, "draft_version_id"
+        );
 
-        if (projectError) {
-          return { content: [{ type: "text", text: `Error: ${projectError.message}` }] };
+        if (projectError || !project) {
+          return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
         }
 
         if (!project.draft_version_id) {
@@ -319,12 +347,10 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         message: z.string().optional().describe("A short note about what changed in this version"),
       },
       async ({ project_id, message }) => {
-        // Get the project
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("id, slug, draft_version_id")
-          .eq("id", project_id)
-          .single();
+        // Get the project (scoped to current user)
+        const { project, error: projectError } = await this.getOwnedProject(
+          supabase, project_id, "id, slug, draft_version_id"
+        );
 
         if (projectError || !project) {
           return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
@@ -431,11 +457,9 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         project_id: z.string().uuid().describe("The project ID"),
       },
       async ({ project_id }) => {
-        const { data: project, error } = await supabase
-          .from("projects")
-          .select("slug, draft_version_id")
-          .eq("id", project_id)
-          .single();
+        const { project, error } = await this.getOwnedProject(
+          supabase, project_id, "slug, draft_version_id"
+        );
 
         if (error || !project) {
           return { content: [{ type: "text", text: `Error: ${error?.message ?? "Project not found"}` }] };
@@ -467,11 +491,9 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         project_id: z.string().uuid().describe("The project ID"),
       },
       async ({ project_id }) => {
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("active_version_id, draft_version_id")
-          .eq("id", project_id)
-          .single();
+        const { project, error: projectError } = await this.getOwnedProject(
+          supabase, project_id, "active_version_id, draft_version_id"
+        );
 
         if (projectError || !project) {
           return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
@@ -508,12 +530,10 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
         version_id: z.string().uuid().describe("The version ID to roll back to (get this from list_versions)"),
       },
       async ({ project_id, version_id }) => {
-        // Get the project's current draft
-        const { data: project, error: projectError } = await supabase
-          .from("projects")
-          .select("draft_version_id")
-          .eq("id", project_id)
-          .single();
+        // Get the project's current draft (scoped to current user)
+        const { project, error: projectError } = await this.getOwnedProject(
+          supabase, project_id, "draft_version_id"
+        );
 
         if (projectError || !project) {
           return { content: [{ type: "text", text: `Error: ${projectError?.message ?? "Project not found"}` }] };
@@ -605,10 +625,16 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
 
         updates.updated_at = new Date().toISOString();
 
-        const { data, error } = await supabase
+        let query = supabase
           .from("projects")
           .update(updates)
-          .eq("id", project_id)
+          .eq("id", project_id);
+
+        if (this.userEmail) {
+          query = query.eq("owner_email", this.userEmail);
+        }
+
+        const { data, error } = await query
           .select("id, name, slug, description, is_public, show_source")
           .single();
 
@@ -638,6 +664,15 @@ export class ShappsMCP extends McpAgent<Env, Record<string, never>, Props> {
       async ({ project_id, confirm }) => {
         if (!confirm) {
           return { content: [{ type: "text", text: "Deletion not confirmed. Set confirm to true to delete." }] };
+        }
+
+        // Verify ownership first
+        const { project: ownedProject, error: ownerError } = await this.getOwnedProject(
+          supabase, project_id, "id"
+        );
+
+        if (ownerError || !ownedProject) {
+          return { content: [{ type: "text", text: `Error: ${ownerError?.message ?? "Project not found"}` }] };
         }
 
         // Clear version pointers first (foreign key constraints)
